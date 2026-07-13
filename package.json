@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "worldgen:extract-biomes": "node scripts/extract-minecraft26-biomes.mjs",
+    "worldgen:extract-features": "node scripts/extract-minecraft26-features.mjs",
+    "assets:extract-textures": "node scripts/extract-minecraft26-textures.mjs"
   },
   "dependencies": {
     "deepslate": "^0.26.0",

@@ -2,7 +2,7 @@
   "compilerOptions": {
     "composite": true,
     "target": "ES2022",
-    "lib": ["ES2022"],
+    "lib": ["ES2022", "DOM"],
     "skipLibCheck": true,
     "module": "ESNext",
     "moduleResolution": "bundler",
@@ -10,5 +10,5 @@
     "noEmit": true,
     "strict": true
   },
-  "include": ["vite.config.ts", "tests", "src/worldgen"]
+  "include": ["vite.config.ts", "tests", "src/worldgen", "src/render"]
 }
