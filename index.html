@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#10150d" />
+    <title>Modern Terrain Lab — Java 26.2</title>
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="viewport" aria-label="Generated voxel terrain"></canvas>
+
+      <aside class="panel">
+        <header>
+          <p class="eyebrow">JAVA EDITION / 26.2</p>
+          <h1>Modern Terrain Lab</h1>
+          <p class="lede">A wide Overworld landmass view backed by the same complete generated voxel data used by the cave inspector.</p>
+        </header>
+
+        <form id="generator-form">
+          <label for="seed">World seed</label>
+          <div class="seed-row">
+            <input id="seed" name="seed" value="87126" autocomplete="off" />
+            <button id="random-seed" type="button" class="icon-button" title="Random seed" aria-label="Random seed">↻</button>
+          </div>
+
+          <label for="world-size">World size</label>
+          <select id="world-size" name="world-size">
+            <option value="64">64 × 384 × 64 — 4 × 4 chunks</option>
+            <option value="128" selected>128 × 384 × 128 — 8 × 8 chunks</option>
+            <option value="192">192 × 384 × 192 — 12 × 12 chunks</option>
+            <option value="256">256 × 384 × 256 — 16 × 16 chunks</option>
+          </select>
+
+          <label for="view-mode">Terrain view</label>
+          <select id="view-mode" name="view-mode">
+            <option value="surface" selected>Surface landscape — landmass focus</option>
+            <option value="full">Full voxel — caves and underground</option>
+          </select>
+          <p id="view-note" class="field-note"></p>
+
+          <button id="generate" class="primary" type="submit">Generate world</button>
+        </form>
+
+        <section class="status-card" aria-live="polite">
+          <div class="status-heading">
+            <span id="status">Ready</span>
+            <span id="progress-value">0%</span>
+          </div>
+          <div class="progress-track"><div id="progress"></div></div>
+          <dl class="stats">
+            <div><dt>Generation</dt><dd id="generation-time">—</dd></div>
+            <div><dt>Land sample</dt><dd id="land-area">128 × 128</dd></div>
+            <div><dt>Surface</dt><dd id="surface-range">—</dd></div>
+            <div><dt>Visible faces</dt><dd id="face-count">—</dd></div>
+            <div><dt>Sea level</dt><dd id="waterline">Y 63</dd></div>
+          </dl>
+        </section>
+
+        <section class="slice-card">
+          <div class="slice-heading">
+            <label for="slice">Vertical slice</label>
+            <output id="slice-value" for="slice">Y 319</output>
+          </div>
+          <input id="slice" type="range" min="-64" max="319" value="319" />
+          <div class="slice-labels"><span>Y −64</span><span>Y 319</span></div>
+        </section>
+
+        <footer>
+          <span><i class="mouse-icon"></i>Drag to orbit</span>
+          <span>Wheel to zoom</span>
+        </footer>
+      </aside>
+
+      <div class="legend" aria-label="Block legend">
+        <span><i style="--swatch:#6c9f45"></i>Grass</span>
+        <span><i style="--swatch:#4f5354"></i>Deepslate</span>
+        <span><i style="--swatch:#2f72bd"></i>Water</span>
+        <span><i style="--swatch:#d8c27a"></i>Sand</span>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
