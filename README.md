@@ -1,6 +1,6 @@
 # Modern Terrain Lab — Minecraft Java 26.2
 
-An interactive browser implementation of Minecraft Java Edition 26.2's modern Overworld terrain pipeline. The generator targets the latest stable release reported by Mojang's official version manifest on July 13, 2026.
+An interactive browser implementation of Minecraft Java Edition 26.2's modern Overworld terrain pipeline.
 
 Implemented systems:
 
@@ -10,11 +10,14 @@ Implemented systems:
 - the −64 through 319 Overworld build range;
 - continentalness, erosion, ridges, depth, jaggedness, and shifted climate noise;
 - cheese, spaghetti, entrance, pillar, and noodle caves represented by the density router;
-- sea-level water and deep lava filling;
-- the 26.2 multi-noise surface-biome parameter table;
+- the Java 26.2 noise-aquifer fluid-level and pressure algorithm;
+- all 66 Java 26.2 biome definitions and the 55-biome Overworld multi-noise parameter table;
 - the 26.2 surface-rule tree across every generated column;
 - large copper and iron ore veins using the official vein router and positional random stream;
-- deterministic parallel tile generation for 4×4 through 16×16 chunk windows;
+- the official vegetation feature order, placement RNG, biome filters, and all Java 26.2 Overworld tree trunk/foliage families;
+- locally extracted official block textures, colormaps, biome grass/foliage/water tinting, and the default 5×5 biome blend;
+- deterministic 32×32-block tile generation across as many as eight workers, followed by off-main-thread tree decoration;
+- typed growable mesh buffers and cached biome colors for faster first render and slice rebuilds;
 - a surface-landscape view that draws the broad landmass while retaining every generated underground voxel;
 - a full-voxel cave view plus an inspectable vertical slice.
 
@@ -22,14 +25,20 @@ The default preview is 128×384×128 blocks (8×8 chunks), with 192- and 256-blo
 
 ## Run
 
-```powershell
+```bash
 npm install
 npm run dev
 ```
 
+The official textures are intentionally not committed. To refresh them from a locally downloaded official 26.2 client JAR:
+
+```bash
+npm run assets:extract-textures -- /path/to/minecraft-26.2-client.jar
+```
+
 ## Verify
 
-```powershell
+```bash
 npm test
 npm run build
 ```
@@ -43,6 +52,6 @@ Minecraft 26.2 ships unobfuscated Java class names, which makes the implementati
 - the MIT-licensed [`deepslate`](https://github.com/misode/deepslate) worldgen primitives;
 - a local TypeScript port of the Overworld biome parameter table.
 
-The current browser implementation covers base density terrain, caves encoded in the noise router, surfaces, biomes, fluids at the global sea/lava levels, and large ore veins. Full parity for noise aquifers, configured-feature decoration, carvers, and structures requires running or integrating additional generation stages; those are intentionally not claimed as complete here.
+The current browser implementation covers block-for-block base density terrain, aquifers, router caves, surfaces, biomes, large ore veins, and the surface tree families. It does not yet claim complete parity for every non-tree configured feature, explicit carver pass, structure, mob, block entity, or gameplay tick.
 
 See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md).

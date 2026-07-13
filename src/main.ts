@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import "./style.css";
 import { buildTerrainMesh, disposeTerrain, type TerrainViewMode } from "./render/terrainMesh";
+import { loadMinecraft26TextureAtlas, type Minecraft26TextureAtlas } from "./render/minecraft26Textures";
 import { parseModernSeed } from "./worldgen/seed";
 import { stitchWorldTiles } from "./worldgen/stitch";
 import type { VoxelWorld } from "./worldgen/types";
@@ -62,13 +63,18 @@ interface TileTask {
   startChunkZ: number;
 }
 
-const TILE_SIZE = 64;
-const MAX_WORKERS = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+// 32-block tiles expose enough independent work to use all performance cores
+// even for the 64-block preview. Worker state is intentionally capped to keep
+// memory predictable on laptops.
+const TILE_SIZE = 32;
+const MAX_WORKERS = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4) - 1));
 let activeWorkers: Worker[] = [];
 let generationToken = 0;
 let currentWorld: VoxelWorld | null = null;
 let terrain: THREE.Group | null = null;
 let sliceTimer = 0;
+let textureAtlas: Minecraft26TextureAtlas | undefined;
+const textureAtlasPromise = loadMinecraft26TextureAtlas();
 
 function resize(): void {
   const width = canvas.clientWidth;
@@ -96,18 +102,19 @@ function updateViewNote(): void {
     : "Full voxel view draws exposed cave and underground geometry and is heavier on large regions.";
 }
 
-function renderWorld(world: VoxelWorld, cutoff: number): void {
+async function renderWorld(world: VoxelWorld, cutoff: number): Promise<void> {
   const mode = selectedViewMode();
   statusText.textContent = cutoff < world.maxY ? "Rebuilding slice" : mode === "surface" ? "Building landmass mesh" : "Building full voxel mesh";
   const startedAt = performance.now();
-  const result = buildTerrainMesh(world, cutoff, mode);
+  textureAtlas ??= await textureAtlasPromise;
+  const result = buildTerrainMesh(world, cutoff, mode, textureAtlas);
   if (terrain) {
     scene.remove(terrain);
     disposeTerrain(terrain);
   }
   terrain = result.group;
   scene.add(terrain);
-  const highestSurface = Math.max(...world.heightmap);
+  const [, highestSurface] = heightRange(world.heightmap);
   const highest = highestSurface - world.minY + 1;
   const visibleTop = Math.min(highest, cutoff - world.minY + 1);
   const focusY = Math.max(12, visibleTop - Math.min(mode === "surface" ? 24 : 14, world.width * 0.18));
@@ -129,7 +136,7 @@ function stopWorkers(): void {
 }
 
 function createTileTasks(size: number): TileTask[] {
-  if (size < TILE_SIZE || size % TILE_SIZE !== 0) throw new RangeError("Landscape size must be a multiple of 64 blocks");
+  if (size < TILE_SIZE || size % TILE_SIZE !== 0) throw new RangeError("Landscape size must be a multiple of 32 blocks");
   const chunksAcross = size / 16;
   const startChunk = -Math.floor(chunksAcross / 2);
   const tilesAcross = size / TILE_SIZE;
@@ -170,7 +177,8 @@ function generateTiles(seed: bigint, size: number, token: number): Promise<Voxel
       settled = true;
       stopWorkers();
       setProgress("Stitching exact chunk coordinates", 0.94);
-      resolve(stitchWorldTiles(tiles, size, startChunk * 16, startChunk * 16));
+      const world = stitchWorldTiles(tiles, size, startChunk * 16, startChunk * 16);
+      resolve(world);
     };
 
     const workerCount = Math.min(MAX_WORKERS, tasks.length);
@@ -221,6 +229,38 @@ function generateTiles(seed: bigint, size: number, token: number): Promise<Voxel
   });
 }
 
+function decorateWorld(world: VoxelWorld, seed: bigint, token: number): Promise<VoxelWorld> {
+  setProgress("Placing biome-specific 26.2 trees", 0.945);
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL("./worldgen/decoration26.worker.ts", import.meta.url), { type: "module" });
+    activeWorkers.push(worker);
+    worker.onmessage = (event: MessageEvent) => {
+      if (token !== generationToken) {
+        worker.terminate();
+        return;
+      }
+      if (event.data.type === "progress") {
+        setProgress("Placing biome-specific 26.2 trees", 0.945 + Number(event.data.progress) * 0.045);
+        return;
+      }
+      if (event.data.type === "complete") {
+        worker.terminate();
+        activeWorkers = activeWorkers.filter((candidate) => candidate !== worker);
+        resolve(event.data.world as VoxelWorld);
+      }
+    };
+    worker.onerror = (event) => {
+      worker.terminate();
+      activeWorkers = activeWorkers.filter((candidate) => candidate !== worker);
+      reject(new Error(event.message));
+    };
+    worker.postMessage(
+      { seed: seed.toString(), world },
+      { transfer: [world.blocks.buffer, world.heightmap.buffer] },
+    );
+  });
+}
+
 async function generate(): Promise<void> {
   generationToken += 1;
   const token = generationToken;
@@ -238,26 +278,37 @@ async function generate(): Promise<void> {
   const startedAt = performance.now();
 
   try {
-    const world = await generateTiles(seed, size, token);
+    let world = await generateTiles(seed, size, token);
+    if (token !== generationToken) return;
+    world = await decorateWorld(world, seed, token);
     if (token !== generationToken) return;
     currentWorld = world;
     generationTime.textContent = `${Math.round(performance.now() - startedAt).toLocaleString()} ms`;
     waterline.textContent = `Y ${world.seaLevel}`;
-    const lowestSurface = Math.min(...world.heightmap);
-    const highestSurface = Math.max(...world.heightmap);
+    const [lowestSurface, highestSurface] = heightRange(world.heightmap);
     landArea.textContent = `${world.width} × ${world.length}`;
     surfaceRange.textContent = `Y ${lowestSurface}–${highestSurface}`;
     slice.min = String(world.minY);
     slice.max = String(world.maxY);
     slice.value = String(world.maxY);
     sliceValue.value = `Y ${world.maxY}`;
-    renderWorld(world, world.maxY);
+    await renderWorld(world, world.maxY);
   } catch (error) {
     if (token !== generationToken) return;
     setProgress(`Generation failed: ${error instanceof Error ? error.message : String(error)}`, 0);
   } finally {
     if (token === generationToken) generateButton.disabled = false;
   }
+}
+
+function heightRange(values: Int16Array): [minimum: number, maximum: number] {
+  let minimum = Number.POSITIVE_INFINITY;
+  let maximum = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    if (value < minimum) minimum = value;
+    if (value > maximum) maximum = value;
+  }
+  return [minimum, maximum];
 }
 
 form.addEventListener("submit", (event) => {
@@ -273,7 +324,7 @@ randomSeedButton.addEventListener("click", () => {
 
 viewModeInput.addEventListener("change", () => {
   updateViewNote();
-  if (currentWorld) renderWorld(currentWorld, Number(slice.value));
+  if (currentWorld) void renderWorld(currentWorld, Number(slice.value));
 });
 
 slice.addEventListener("input", () => {
@@ -281,7 +332,7 @@ slice.addEventListener("input", () => {
   sliceValue.value = `Y ${value}`;
   window.clearTimeout(sliceTimer);
   sliceTimer = window.setTimeout(() => {
-    if (currentWorld) renderWorld(currentWorld, value);
+    if (currentWorld) void renderWorld(currentWorld, value);
   }, 100);
 });
 

@@ -14,13 +14,20 @@ import {
   clampedMap,
 } from "deepslate";
 import { Block, blockIdFromMinecraftName } from "./blocks";
+import { installMinecraft26Aquifer } from "./aquifer26";
+import { installMinecraft26PositionalRandoms } from "./random26";
+import { createMinecraft26SurfaceRule } from "./surface26";
+import { extendMinecraft26ErodedBadlands, extendMinecraft26FrozenOcean } from "./surfaceExtensions26";
 import type { VoxelWorld } from "./types";
 
 // Generated from the official 26.2 server JAR by the user's local extraction tool.
 // @ts-expect-error generated JavaScript asset intentionally has no declaration file
 import { MINECRAFT_26_2_WORLDGEN } from "../generated/minecraft26WorldgenData.js";
-// @ts-expect-error local JavaScript port of the 26.2 OverworldBiomeBuilder table
-import { createMinecraft26OverworldBiomeParameters, sampleMinecraft26SurfaceBiome } from "./minecraft26BiomeSource.js";
+import {
+  createMinecraft26OverworldBiomeParameters,
+  obfuscateMinecraft26BiomeSeed,
+  sampleMinecraft26SurfaceBiome,
+} from "./minecraft26BiomeSource.js";
 
 export const MODERN_26_2 = Object.freeze({
   version: "26.2" as const,
@@ -32,12 +39,29 @@ export const MODERN_26_2 = Object.freeze({
   cellHeight: 8,
 });
 
+// interval_select is immutable generated JSON. Converting it once at module
+// load avoids rebuilding the same large object graph for every chunk while
+// still reparsing fresh stateful density/cache wrappers below.
+const COMPATIBLE_DENSITY_FUNCTIONS = MINECRAFT_26_2_WORLDGEN.densityFunctions.map(
+  ([resourceId, json]: [string, unknown]) => [resourceId, expandIntervalSelect(json)] as const,
+);
+const COMPATIBLE_SETTINGS = expandIntervalSelect(MINECRAFT_26_2_WORLDGEN.settings);
+
 export interface ModernGenerateOptions {
   seed: bigint;
   size: number;
   startChunkX?: number;
   startChunkZ?: number;
   onProgress?: (stage: string, progress: number) => void;
+}
+
+export function createModern26BiomeSampler(seed: bigint): (x: number, y: number, z: number) => string {
+  const parameters = createMinecraft26OverworldBiomeParameters();
+  const settings = ensureRegistries();
+  const randomState = withoutKnownRouterWarning(() => new RandomState(settings, seed));
+  installMinecraft26PositionalRandoms(randomState);
+  const zoomSeed = obfuscateMinecraft26BiomeSeed(seed);
+  return (x, y, z) => sampleMinecraft26SurfaceBiome(parameters, randomState.sampler, zoomSeed, x, y, z);
 }
 
 function ensureRegistries(): ReturnType<typeof NoiseGeneratorSettings.fromJson> {
@@ -50,18 +74,18 @@ function ensureRegistries(): ReturnType<typeof NoiseGeneratorSettings.fromJson> 
     const id = Identifier.parse(resourceId);
     WorldgenRegistries.NOISE.register(id, () => WorldgenRegistries.NOISE.parse(json));
   }
-  for (const [resourceId, json] of MINECRAFT_26_2_WORLDGEN.densityFunctions) {
+  for (const [resourceId, compatibleJson] of COMPATIBLE_DENSITY_FUNCTIONS) {
     const id = Identifier.parse(resourceId);
-    const compatibleJson = expandIntervalSelect(json);
     WorldgenRegistries.DENSITY_FUNCTION.register(id, () => WorldgenRegistries.DENSITY_FUNCTION.parse(compatibleJson));
   }
-  return withoutKnownRouterWarning(() => NoiseGeneratorSettings.fromJson(expandIntervalSelect(MINECRAFT_26_2_WORLDGEN.settings)));
+  return withoutKnownRouterWarning(() => NoiseGeneratorSettings.fromJson(COMPATIBLE_SETTINGS));
 }
 
 export function generateModern26World(options: ModernGenerateOptions): VoxelWorld {
   if (options.size < 16 || options.size % 16 !== 0) throw new RangeError("World size must be a multiple of 16");
   const report = (stage: string, progress: number) => options.onProgress?.(stage, Math.max(0, Math.min(1, progress)));
   const biomeParameters = createMinecraft26OverworldBiomeParameters();
+  const biomeZoomSeed = obfuscateMinecraft26BiomeSeed(options.seed);
   const chunksAcross = options.size / 16;
   const startChunkX = options.startChunkX ?? -Math.floor(chunksAcross / 2);
   const startChunkZ = options.startChunkZ ?? -Math.floor(chunksAcross / 2);
@@ -72,7 +96,6 @@ export function generateModern26World(options: ModernGenerateOptions): VoxelWorl
   const heightmap = new Int16Array(oneY);
   heightmap.fill(MODERN_26_2.minY);
   const biomeMap = new Array<string>(oneY).fill("plains");
-  const chunks: Array<{ chunk: Chunk; noiseChunk: NoiseChunk }> = [];
   let completed = 0;
   const totalChunks = chunksAcross * chunksAcross;
 
@@ -88,49 +111,29 @@ export function generateModern26World(options: ModernGenerateOptions): VoxelWorl
       const chunkSettings = ensureRegistries();
       const generator = new NoiseChunkGenerator({ getBiome: () => Identifier.parse("minecraft:plains") }, chunkSettings);
       const randomState = withoutKnownRouterWarning(() => new RandomState(chunkSettings, options.seed));
-      generator.fill(randomState, chunk);
+      installMinecraft26PositionalRandoms(randomState);
       const noiseChunk = (generator as unknown as { getOrCreateNoiseChunk(state: RandomState, target: Chunk): NoiseChunk })
         .getOrCreateNoiseChunk(randomState, chunk);
+      installMinecraft26Aquifer(noiseChunk, randomState, chunkSettings);
+      generator.fill(randomState, chunk);
       applyOreVeins(chunk, randomState);
-      buildFullSurface(chunk, noiseChunk, randomState, chunkSettings, biomeParameters);
-      chunks.push({ chunk, noiseChunk });
+      buildFullSurface(chunk, noiseChunk, randomState, chunkSettings, biomeParameters, biomeZoomSeed);
+      packChunk(
+        chunk,
+        blocks,
+        heightmap,
+        biomeMap,
+        options.size,
+        oneY,
+        originX,
+        originZ,
+        biomeParameters,
+        randomState,
+        biomeZoomSeed,
+      );
       completed += 1;
-      report("Generating density, caves, and surfaces", 0.04 + (completed / totalChunks) * 0.78);
+      report("Generating and packing exact chunks", 0.04 + (completed / totalChunks) * 0.95);
     }
-  }
-
-  report("Packing voxel world", 0.84);
-  const biomeSettings = ensureRegistries();
-  const biomeRandomState = withoutKnownRouterWarning(() => new RandomState(biomeSettings, options.seed));
-  for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
-    const { chunk } = chunks[chunkIndex];
-    const chunkOriginX = ChunkPos.minBlockX(chunk.pos);
-    const chunkOriginZ = ChunkPos.minBlockZ(chunk.pos);
-    for (let z = 0; z < 16; z += 1) {
-      const worldZ = chunkOriginZ + z;
-      const localZ = worldZ - originZ;
-      for (let x = 0; x < 16; x += 1) {
-        const worldX = chunkOriginX + x;
-        const localX = worldX - originX;
-        const column = localZ * options.size + localX;
-        let topSolid = MODERN_26_2.minY;
-        for (let y = MODERN_26_2.minY; y <= MODERN_26_2.maxY; y += 1) {
-          const state = chunk.getBlockState(BlockPos.create(worldX, y, worldZ));
-          const block = blockIdFromMinecraftName(state.getName().toString());
-          blocks[(y - MODERN_26_2.minY) * oneY + column] = block;
-          if (block !== Block.Air && block !== Block.Water && block !== Block.Lava) topSolid = y;
-        }
-        heightmap[column] = topSolid;
-        biomeMap[column] = sampleMinecraft26SurfaceBiome(
-          biomeParameters,
-          biomeRandomState.sampler,
-          worldX,
-          topSolid,
-          worldZ,
-        );
-      }
-    }
-    report("Packing voxel world", 0.84 + ((chunkIndex + 1) / chunks.length) * 0.15);
   }
   report("Complete", 1);
 
@@ -151,98 +154,173 @@ export function generateModern26World(options: ModernGenerateOptions): VoxelWorl
   };
 }
 
+const PACKED_BLOCK_IDS = new Map<string, Block>();
+
+function packChunk(
+  chunk: Chunk,
+  blocks: Uint8Array,
+  heightmap: Int16Array,
+  biomeMap: string[],
+  size: number,
+  oneY: number,
+  originX: number,
+  originZ: number,
+  biomeParameters: ReturnType<typeof createMinecraft26OverworldBiomeParameters>,
+  biomeRandomState: RandomState,
+  biomeZoomSeed: bigint,
+): void {
+  const chunkOriginX = ChunkPos.minBlockX(chunk.pos);
+  const chunkOriginZ = ChunkPos.minBlockZ(chunk.pos);
+  const offsetX = chunkOriginX - originX;
+  const offsetZ = chunkOriginZ - originZ;
+  for (let sectionIndex = 0; sectionIndex < chunk.sections.length; sectionIndex += 1) {
+    const section = chunk.sections[sectionIndex];
+    if (!section) continue;
+    const sectionY = MODERN_26_2.minY + sectionIndex * 16;
+    for (let localY = 0; localY < 16; localY += 1) {
+      const worldY = sectionY + localY;
+      const destinationY = (worldY - MODERN_26_2.minY) * oneY;
+      for (let z = 0; z < 16; z += 1) {
+        const destinationRow = destinationY + (offsetZ + z) * size + offsetX;
+        const columnRow = (offsetZ + z) * size + offsetX;
+        for (let x = 0; x < 16; x += 1) {
+          const state = section.getBlockState(x, localY, z);
+          const name = state.getName().toString();
+          let block = PACKED_BLOCK_IDS.get(name);
+          if (block === undefined) {
+            block = blockIdFromMinecraftName(name);
+            PACKED_BLOCK_IDS.set(name, block);
+          }
+          blocks[destinationRow + x] = block;
+          if (block !== Block.Air && block !== Block.Water && block !== Block.Lava) {
+            heightmap[columnRow + x] = worldY;
+          }
+        }
+      }
+    }
+  }
+  for (let z = 0; z < 16; z += 1) {
+    const worldZ = chunkOriginZ + z;
+    for (let x = 0; x < 16; x += 1) {
+      const worldX = chunkOriginX + x;
+      const column = (offsetZ + z) * size + offsetX + x;
+      biomeMap[column] = sampleMinecraft26SurfaceBiome(
+        biomeParameters,
+        biomeRandomState.sampler,
+        biomeZoomSeed,
+        worldX,
+        heightmap[column],
+        worldZ,
+      );
+    }
+  }
+}
+
 function buildFullSurface(
   chunk: Chunk,
   noiseChunk: NoiseChunk,
   randomState: RandomState,
   settings: ReturnType<typeof NoiseGeneratorSettings.fromJson>,
   biomeParameters: ReturnType<typeof createMinecraft26OverworldBiomeParameters>,
+  biomeZoomSeed: bigint,
 ): void {
   const system = randomState.surfaceSystem;
   const getBiome = (pos: BlockPos): string => sampleMinecraft26SurfaceBiome(
     biomeParameters,
     randomState.sampler,
+    biomeZoomSeed,
     pos[0],
     pos[1],
     pos[2],
   );
   const context = new SurfaceContext(system, chunk, noiseChunk, settings.noise, getBiome);
-  const surfaceAccess = system as unknown as {
-    rule: (value: SurfaceContext) => (x: number, y: number, z: number) => BlockState | undefined;
-    getRandom: (name: string) => unknown;
-    random: {
-      fromHashOf: (name: string) => {
-        forkPositional: () => { at: (x: number, y: number, z: number) => { nextFloat: () => number } };
-      };
-    };
-  };
-  const ruleFactory = surfaceAccess.rule;
-  const rule = ruleFactory(context);
+  const worldSurfaceHeights = getWorldSurfaceHeights(chunk);
+  const rule = createMinecraft26SurfaceRule(
+    MINECRAFT_26_2_WORLDGEN.settings.surface_rule,
+    context,
+    randomState,
+    worldSurfaceHeights,
+  );
   const minX = ChunkPos.minBlockX(chunk.pos);
   const minZ = ChunkPos.minBlockZ(chunk.pos);
-  const originalGetRandom = surfaceAccess.getRandom;
-  const positionalRules = new Map<string, { nextFloat: () => number }>();
 
-  // deepslate 0.26 evaluates vertical-gradient surface randomness from a
-  // shared sequential stream. Mojang uses randomFactory.at(x, y, z), so the
-  // sequential implementation changes blocks when chunk traversal order or
-  // worker tiling changes. Route those rule samples through absolute block
-  // coordinates to match the official readable 26.2 implementation.
-  surfaceAccess.getRandom = (name: string) => {
-    let random = positionalRules.get(name);
-    if (!random) {
-      const factory = surfaceAccess.random.fromHashOf(name).forkPositional();
-      random = {
-        nextFloat: () => factory.at(context.blockX, context.blockY, context.blockZ).nextFloat(),
-      };
-      positionalRules.set(name, random);
-    }
-    return random;
-  };
-
-  try {
-    for (let offsetX = 0; offsetX < 16; offsetX += 1) {
-      const x = minX + offsetX;
-      for (let offsetZ = 0; offsetZ < 16; offsetZ += 1) {
-        const z = minZ + offsetZ;
-        context.updateXZ(x, z);
-        let stoneDepthAbove = 0;
-        let waterHeight = Number.MIN_SAFE_INTEGER;
-        let stoneFloor = Number.MAX_SAFE_INTEGER;
-        for (let y = chunk.maxY - 1; y >= chunk.minY; y -= 1) {
-          const pos = BlockPos.create(x, y, z);
-          const state = chunk.getBlockState(pos);
-          if (state.equals(BlockState.AIR)) {
-            stoneDepthAbove = 0;
-            waterHeight = Number.MIN_SAFE_INTEGER;
-            continue;
-          }
-          if (state.isFluid()) {
-            if (waterHeight === Number.MIN_SAFE_INTEGER) waterHeight = y + 1;
-            continue;
-          }
-          if (stoneFloor >= y) {
-            stoneFloor = Number.MIN_SAFE_INTEGER;
-            for (let belowY = y - 1; belowY >= chunk.minY; belowY -= 1) {
-              const below = chunk.getBlockState(BlockPos.create(x, belowY, z));
-              if (below.equals(BlockState.AIR) || below.isFluid()) {
-                stoneFloor = belowY + 1;
-                break;
-              }
+  for (let offsetX = 0; offsetX < 16; offsetX += 1) {
+    const x = minX + offsetX;
+    for (let offsetZ = 0; offsetZ < 16; offsetZ += 1) {
+      const z = minZ + offsetZ;
+      const heightIndex = offsetZ * 16 + offsetX;
+      const startingHeight = worldSurfaceHeights[heightIndex] + 2;
+      const surfaceBiome = getBiome(BlockPos.create(x, startingHeight, z));
+      if (surfaceBiome === "eroded_badlands") {
+        const extensionTop = extendMinecraft26ErodedBadlands(chunk, randomState, settings, x, z, startingHeight);
+        if (extensionTop !== undefined) worldSurfaceHeights[heightIndex] = Math.max(worldSurfaceHeights[heightIndex], extensionTop);
+      }
+      context.updateXZ(x, z);
+      let stoneDepthAbove = 0;
+      let waterHeight = Number.MIN_SAFE_INTEGER;
+      let stoneFloor = Number.MAX_SAFE_INTEGER;
+      for (let y = chunk.maxY - 1; y >= chunk.minY; y -= 1) {
+        const pos = BlockPos.create(x, y, z);
+        const state = chunk.getBlockState(pos);
+        if (state.equals(BlockState.AIR)) {
+          stoneDepthAbove = 0;
+          waterHeight = Number.MIN_SAFE_INTEGER;
+          continue;
+        }
+        if (state.isFluid()) {
+          if (waterHeight === Number.MIN_SAFE_INTEGER) waterHeight = y + 1;
+          continue;
+        }
+        if (stoneFloor >= y) {
+          stoneFloor = Number.MIN_SAFE_INTEGER;
+          for (let belowY = y - 1; belowY >= chunk.minY; belowY -= 1) {
+            const below = chunk.getBlockState(BlockPos.create(x, belowY, z));
+            if (below.equals(BlockState.AIR) || below.isFluid()) {
+              stoneFloor = belowY + 1;
+              break;
             }
           }
-          stoneDepthAbove += 1;
-          const stoneDepthBelow = y - stoneFloor + 1;
-          if (!state.equals(settings.defaultBlock)) continue;
-          context.updateY(stoneDepthAbove, stoneDepthBelow, waterHeight, y);
-          const replacement = rule(x, y, z);
-          if (replacement) chunk.setBlockState(pos, replacement);
         }
+        stoneDepthAbove += 1;
+        const stoneDepthBelow = y - stoneFloor + 1;
+        if (!state.equals(settings.defaultBlock)) continue;
+        context.updateY(stoneDepthAbove, stoneDepthBelow, waterHeight, y);
+        const replacement = rule(x, y, z);
+        if (replacement) chunk.setBlockState(pos, replacement);
+      }
+      if (surfaceBiome === "frozen_ocean" || surfaceBiome === "deep_frozen_ocean") {
+        extendMinecraft26FrozenOcean(
+          chunk,
+          randomState,
+          x,
+          z,
+          startingHeight,
+          context.minSurfaceLevel(),
+          surfaceBiome,
+          settings.seaLevel,
+        );
       }
     }
-  } finally {
-    surfaceAccess.getRandom = originalGetRandom;
   }
+}
+
+function getWorldSurfaceHeights(chunk: Chunk): Int16Array {
+  const heights = new Int16Array(16 * 16);
+  const minX = ChunkPos.minBlockX(chunk.pos);
+  const minZ = ChunkPos.minBlockZ(chunk.pos);
+  for (let z = 0; z < 16; z += 1) {
+    for (let x = 0; x < 16; x += 1) {
+      let height = chunk.minY - 1;
+      for (let y = chunk.maxY - 1; y >= chunk.minY; y -= 1) {
+        if (!chunk.getBlockState(BlockPos.create(minX + x, y, minZ + z)).equals(BlockState.AIR)) {
+          height = y;
+          break;
+        }
+      }
+      heights[z * 16 + x] = height;
+    }
+  }
+  return heights;
 }
 
 function applyOreVeins(chunk: Chunk, randomState: RandomState): void {
